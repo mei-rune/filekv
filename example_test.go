@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strconv"
 )
 
 // Example demonstrates the basic usage of FileKVStore
@@ -12,7 +11,8 @@ func Example() {
 	// 创建临时目录
 	tempDir, err := os.MkdirTemp("", "filekv-test")
 	if err != nil {
-		t.Fatal(err)
+		fmt.Println("mkdir temp dir failed: " + err.Error())
+		return
 	}
 	defer os.RemoveAll(tempDir)
 
@@ -22,12 +22,12 @@ func Example() {
 	ctx := context.Background()
 
 	// Set a value
-	_, err := store.Set(ctx, "test/key", []byte("hello world"))
+	version1, err := store.Set(ctx, "test/key", []byte("hello world"))
 	if err != nil {
 		fmt.Println("Error setting value: " + err.Error())
 		return
 	}
-	fmt.Println("Set value with version: ")
+	fmt.Println("Set value successfully")
 
 	// Get the value
 	value, err := store.Get(ctx, "test/key")
@@ -37,28 +37,61 @@ func Example() {
 	}
 	fmt.Println("Got value: " + string(value))
 
-	// Get histories
+	// Get histories count
 	histories, err := store.GetHistories(ctx, "test/key")
 	if err != nil {
 		fmt.Println("Error getting histories: " + err.Error())
 		return
 	}
-	fmt.Println("Number of histories: " + strconv.Itoa(len(histories)))
+	fmt.Printf("Number of histories: %d\n", len(histories))
 
-	// Test cached store
-	cachedStore := NewCachedFileKVStore(store)
-	valueFromCache, err := cachedStore.Get(ctx, "test/key")
+	// Set a new value
+	version2, err := store.Set(ctx, "test/key", []byte("hello filekv"))
 	if err != nil {
-		fmt.Println("Error getting value from cache: " + err.Error())
+		fmt.Println("Error setting value: " + err.Error())
 		return
 	}
-	fmt.Println("Got value from cache: " + string(valueFromCache))
+	fmt.Println("Set new value successfully")
 
-	// Run fsck
-	err = store.Fsck(ctx)
+	// Get the updated value
+	value, err = store.Get(ctx, "test/key")
 	if err != nil {
-		fmt.Println("Error running fsck: " + err.Error())
+		fmt.Println("Error getting value: " + err.Error())
 		return
 	}
-	fmt.Println("Fsck completed successfully")
+	fmt.Println("Got updated value: " + string(value))
+
+	// Get histories count
+	histories, err = store.GetHistories(ctx, "test/key")
+	if err != nil {
+		fmt.Println("Error getting histories: " + err.Error())
+		return
+	}
+	fmt.Printf("Number of histories: %d\n", len(histories))
+
+	// Get the old value by version
+	oldValue, err := store.GetByVersion(ctx, "test/key", version1)
+	if err != nil {
+		fmt.Println("Error getting old value: " + err.Error())
+		return
+	}
+	fmt.Println("Got old value by version: " + string(oldValue))
+
+	// Get the new value by version
+	newValue, err := store.GetByVersion(ctx, "test/key", version2)
+	if err != nil {
+		fmt.Println("Error getting new value: " + err.Error())
+		return
+	}
+	fmt.Println("Got new value by version: " + string(newValue))
+
+	// Output:
+	// Set value successfully
+	// Got value: hello world
+	// Number of histories: 1
+	// Set new value successfully
+	// Got updated value: hello filekv
+	// Number of histories: 2
+	// Got old value by version: hello world
+	// Got new value by version: hello filekv
 }
