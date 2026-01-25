@@ -12,12 +12,14 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/cabify/timex"
 )
 
 type Version struct {
-	Name      string
+	Name    string
 	Version string
-	Meta      map[string]string
+	Meta    map[string]string
 }
 
 // KeyValueStore 是键值存储接口
@@ -111,7 +113,7 @@ type KeyValueStore interface {
 }
 
 const (
-	metaSuffix = ".meta"
+	metaSuffix       = ".meta"
 	historyDirSuffix = ".h"
 	historyDirConst  = ".history"
 	pagePrefix       = "p_"
@@ -251,8 +253,7 @@ func (f *FileKVStore) Get(ctx context.Context, key string) ([]byte, error) {
 	return data, nil
 }
 
-func (f *FileKVStore) searchVersionPath(ctx context.Context, historyDir string, version string, isExist func(versionFile string) error) (string, error) {
-	// Check subdirectories
+func (f *FileKVStore) searchVersionInSubDirs(ctx context.Context, historyDir string, version string, isExist func(versionFile string) error) (string, error) {
 	entries, err := os.ReadDir(historyDir)
 	if err != nil {
 		return "", errorWrap(err, "reading history directory")
@@ -304,7 +305,7 @@ func (f *FileKVStore) GetByVersion(ctx context.Context, key string, version stri
 		return nil, errorWrap(err, "reading history")
 	}
 
-	_, err = f.searchVersionPath(ctx, historyDir, version, func(versionFile string) error {
+	_, err = f.searchVersionInSubDirs(ctx, historyDir, version, func(versionFile string) error {
 		data, err = os.ReadFile(versionFile)
 		return err
 	})
@@ -335,6 +336,12 @@ func (f *FileKVStore) Set(ctx context.Context, key string, value []byte) (string
 		return "", nil
 	}
 
+	// Create history record
+	// 使用纳秒级时间戳，确保每个历史记录都有唯一的文件名
+	timestamp := strconv.FormatInt(timex.Now().UnixNano(), 10)
+	historyDir := f.keyToHistoryPath(key)
+	historyFile := filepath.Join(historyDir, timestamp)
+
 	// Write new value
 	err = os.WriteFile(dataFile, value, 0644)
 	if err != nil {
@@ -352,12 +359,15 @@ func (f *FileKVStore) Set(ctx context.Context, key string, value []byte) (string
 		if err != nil {
 			return "", errorWrap(err, "writing file")
 		}
-	}
 
-	// Create history record
-	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
-	historyDir := f.keyToHistoryPath(key)
-	historyFile := filepath.Join(historyDir, timestamp)
+		// Directory doesn't exist, create it and retry
+		mkdirErr := os.MkdirAll(historyDir, 0755)
+		if mkdirErr != nil {
+			if !f.ignoreWarning {
+				return "", errorWrap(mkdirErr, "creating history directory")
+			}
+		}
+	}
 
 	err = os.WriteFile(historyFile, value, 0644)
 	if err != nil {
@@ -424,7 +434,7 @@ func (f *FileKVStore) SetMeta(ctx context.Context, key, version string, meta map
 				return err
 			}
 			// If no history exists, create one based on current value
-			timestamp := time.Now().Unix()
+			timestamp := timex.Now().UnixNano()
 			versionName, err := f.ensureHistoryRecordExists(key, historyDir, timestamp)
 			if err != nil {
 				return err
@@ -439,15 +449,22 @@ func (f *FileKVStore) SetMeta(ctx context.Context, key, version string, meta map
 		return f.writeProperties(metaFile, meta)
 	}
 
-	versionFile, err := f.searchVersionPath(ctx, historyDir, version, func(versionFile string) error {
-		_, err := os.Stat(versionFile)
-		return err
-	})
+	versionFile := filepath.Join(historyDir, version)
+	_, err := os.Stat(versionFile)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return errorWrap(os.ErrNotExist, "no history found for key '"+key+"'")
+		if !os.IsNotExist(err) {
+			return errorWrap(err, "check history")
 		}
-		return errorWrap(err, "reading history")
+		versionFile, err = f.searchVersionInSubDirs(ctx, historyDir, version, func(versionFile string) error {
+			_, err := os.Stat(versionFile)
+			return err
+		})
+		if err != nil {
+			if os.IsNotExist(err) {
+				return errorWrap(os.ErrNotExist, "no history found for key '"+key+"'")
+			}
+			return errorWrap(err, "search history")
+		}
 	}
 	return f.writeProperties(versionFile+metaSuffix, meta)
 }
@@ -464,7 +481,7 @@ func (f *FileKVStore) UpdateMeta(ctx context.Context, key, version string, meta 
 		lastVersion, err := f.GetLastVersion(ctx, key)
 		if err != nil {
 			// If no history exists, create one based on current value
-			timestamp := time.Now().Unix()
+			timestamp := timex.Now().UnixNano()
 			versionName, err := f.ensureHistoryRecordExists(key, historyDir, timestamp)
 			if err != nil {
 				return err
@@ -477,15 +494,22 @@ func (f *FileKVStore) UpdateMeta(ctx context.Context, key, version string, meta 
 		// First try default directory
 		metaFile = filepath.Join(historyDir, version+metaSuffix)
 	} else {
-		versionFile, err := f.searchVersionPath(ctx, historyDir, version, func(versionFile string) error {
-			_, err := os.Stat(versionFile)
-			return err
-		})
+		versionFile := filepath.Join(historyDir, version)
+		_, err := os.Stat(versionFile)
 		if err != nil {
-			if os.IsNotExist(err) {
-				return errorWrap(os.ErrNotExist, "no history found for key '"+key+"'")
+			if !os.IsNotExist(err) {
+				return errorWrap(err, "check default history")
 			}
-			return errorWrap(err, "reading history")
+			versionFile, err = f.searchVersionInSubDirs(ctx, historyDir, version, func(versionFile string) error {
+				_, err := os.Stat(versionFile)
+				return err
+			})
+			if err != nil {
+				if os.IsNotExist(err) {
+					return errorWrap(os.ErrNotExist, "no history found for key '"+key+"'")
+				}
+				return errorWrap(err, "search history")
+			}
 		}
 
 		metaFile = versionFile + metaSuffix
@@ -579,25 +603,22 @@ func (f *FileKVStore) ListKeys(ctx context.Context, prefix string) ([]string, er
 		if strings.HasSuffix(d.Name(), historyDirSuffix) {
 			return filepath.SkipDir
 		}
-		if d.IsDir() {
-			if prefix != "" {
-				relPath, err := filepath.Rel(f.rootDir, pa)
-				if err != nil {
-					return errorWrap(err, "getting relative path")
-				}
-
-				if !strings.HasPrefix(relPath, prefix) {
-					return filepath.SkipDir
-				}
-			}
-			return nil
-		}
 
 		relPath, err := filepath.Rel(f.rootDir, pa)
 		if err != nil {
 			return errorWrap(err, "getting relative path")
 		}
-		if relPath == "" || relPath == "." || relPath == historyDirConst {
+
+		// Convert backslashes to forward slashes for consistent handling
+		relPath = strings.ReplaceAll(relPath, "\\", "/")
+
+		if d.IsDir() {
+			// 对于目录，我们不应该根据前缀跳过，因为它可能包含匹配前缀的文件
+			if len(relPath) > len(prefix) {
+				if !strings.HasPrefix(relPath, prefix) {
+					return filepath.SkipDir
+				}
+			}
 			return nil
 		}
 
@@ -656,9 +677,9 @@ func (f *FileKVStore) GetHistories(ctx context.Context, key string) ([]Version, 
 				}
 
 				versions = append(versions, Version{
-					Name: versionName,
+					Name:    versionName,
 					Version: subEntry.Name(),
-					Meta: meta,
+					Meta:    meta,
 				})
 			}
 		} else {
@@ -674,9 +695,9 @@ func (f *FileKVStore) GetHistories(ctx context.Context, key string) ([]Version, 
 			}
 
 			versions = append(versions, Version{
-				Name: versionName,
+				Name:    versionName,
 				Version: entry.Name(),
-				Meta: meta,
+				Meta:    meta,
 			})
 		}
 	}
@@ -724,16 +745,16 @@ func (f *FileKVStore) GetLastVersion(ctx context.Context, key string) (*Version,
 
 	if maxTime > 0 {
 		versionName := strconv.FormatInt(maxTime, 10)
-		metaFile := filepath.Join(historyDir, versionName+".mata")
+		metaFile := filepath.Join(historyDir, versionName+metaSuffix)
 		meta, err := f.readProperties(metaFile)
 		if err != nil && !os.IsNotExist(err) {
 			return nil, errorWrap(err, "reading meta file")
 		}
 
 		return &Version{
-			Name: versionName,
+			Name:    versionName,
 			Version: versionName,
-			Meta: meta,
+			Meta:    meta,
 		}, nil
 	}
 
@@ -777,9 +798,9 @@ func (f *FileKVStore) GetLastVersion(ctx context.Context, key string) (*Version,
 			return nil, errorWrap(err, "reading meta file '"+versionFile+metaSuffix+"'")
 		}
 		return &Version{
-			Name: versionName,
+			Name:    versionName,
 			Version: strconv.FormatInt(maxTime, 10),
-			Meta: meta,
+			Meta:    meta,
 		}, nil
 	}
 
@@ -792,62 +813,31 @@ func (f *FileKVStore) CleanupHistoriesByTime(ctx context.Context, key string, ma
 	}
 
 	historyDir := f.keyToHistoryPath(key)
-	cutoffTime := time.Now().Add(-maxAge).Unix()
+	cutoffTime := timex.Now().Add(-maxAge).Unix()
 
-	// Clean up default directory
-	entries, err := os.ReadDir(historyDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
+	errList := f.foreachHistories(historyDir, func(historyFile string, version string, info os.FileInfo) (bool, error) {
+		timestamp, err := strconv.ParseInt(version, 10, 64)
+		if err != nil {
+			return true, nil
 		}
-		return errorWrap(err, "reading history directory")
-	}
 
-	for _, entry := range entries {
-		if entry.IsDir() && strings.HasPrefix(entry.Name(), pagePrefix) {
-			// Process subdirectory
-			subdirPath := filepath.Join(historyDir, entry.Name())
-			subEntries, err := os.ReadDir(subdirPath)
-			if err != nil {
-				continue
+		if timestamp < cutoffTime {
+			// Remove the history file and its meta file
+			if err := os.Remove(historyFile); err != nil && !os.IsNotExist(err) {
+				return true, errorWrap(err, "removing history file")
 			}
-
-			for _, subEntry := range subEntries {
-				if subEntry.IsDir() || strings.HasSuffix(subEntry.Name(), metaSuffix) {
-					continue
-				}
-
-				timestamp, err := strconv.ParseInt(subEntry.Name(), 10, 64)
-				if err != nil {
-					continue
-				}
-
-				if timestamp < cutoffTime {
-					// Remove the history file and its meta file
-					if err := os.Remove(filepath.Join(subdirPath, subEntry.Name())); err != nil && !os.IsNotExist(err) {
-						return errorWrap(err, "removing history file")
-					}
-					if err := os.Remove(filepath.Join(subdirPath, subEntry.Name()+metaSuffix)); err != nil && !os.IsNotExist(err) {
-						return errorWrap(err, "removing history meta file")
-					}
-				}
-			}
-		} else if !entry.IsDir() && !strings.HasSuffix(entry.Name(), metaSuffix) {
-			timestamp, err := strconv.ParseInt(entry.Name(), 10, 64)
-			if err != nil {
-				continue
-			}
-
-			if timestamp < cutoffTime {
-				// Remove the history file and its meta file
-				if err := os.Remove(filepath.Join(historyDir, entry.Name())); err != nil && !os.IsNotExist(err) {
-					return errorWrap(err, "removing history file")
-				}
-				if err := os.Remove(filepath.Join(historyDir, entry.Name()+metaSuffix)); err != nil && !os.IsNotExist(err) {
-					return errorWrap(err, "removing history meta file")
-				}
+			if err := os.Remove(historyFile + metaSuffix); err != nil && !os.IsNotExist(err) {
+				return true, errorWrap(err, "removing history meta file")
 			}
 		}
+		return true, nil
+	})
+
+	if len(errList) > 0 {
+		if len(errList) == 1 {
+			return errList[0]
+		}
+		return errors.Join(errList...)
 	}
 
 	return nil
@@ -862,43 +852,30 @@ func (f *FileKVStore) CleanupHistoriesByCount(ctx context.Context, key string, m
 
 	// Collect all history files
 	var allHistories []Version
-	// Add histories from default directory
-	entries, err := os.ReadDir(historyDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return errorWrap(err, "reading history directory")
-	}
 
-	for _, entry := range entries {
-		if entry.IsDir() && strings.HasPrefix(entry.Name(), pagePrefix) {
-			// Add histories from subdirectory
-			subdirPath := filepath.Join(historyDir, entry.Name())
-			subEntries, err := os.ReadDir(subdirPath)
-			if err != nil {
-				continue
-			}
-
-			for _, subEntry := range subEntries {
-				if !subEntry.IsDir() && !strings.HasSuffix(subEntry.Name(), metaSuffix) {
-					allHistories = append(allHistories, Version{
-						Name: entry.Name()+"/"+subEntry.Name(),
-						Version: subEntry.Name(),
-					})
-				}
-			}
-		} else if !entry.IsDir() && !strings.HasSuffix(entry.Name(), metaSuffix) {
-			allHistories = append(allHistories, Version{
-						Name: entry.Name()+"/"+entry.Name(),
-						Version: entry.Name(),
-					})
+	errList := f.foreachHistories(historyDir, func(historyFile string, version string, info os.FileInfo) (bool, error) {
+		relPath, err := filepath.Rel(historyDir, historyFile)
+		if err != nil {
+			return true, nil
 		}
+
+		allHistories = append(allHistories, Version{
+			Name:    relPath,
+			Version: version,
+		})
+		return true, nil
+	})
+
+	if len(errList) > 0 {
+		if len(errList) == 1 {
+			return errList[0]
+		}
+		return errors.Join(errList...)
 	}
 
 	// Sort by timestamp (oldest first)
 	sort.Slice(allHistories, func(i, j int) bool {
-		return allHistories[i].Version < allHistories[i].Version
+		return allHistories[i].Version < allHistories[j].Version
 	})
 
 	// Determine which histories to keep
@@ -908,15 +885,24 @@ func (f *FileKVStore) CleanupHistoriesByCount(ctx context.Context, key string, m
 	toRemove := allHistories[:len(allHistories)-maxCount]
 
 	// Delete histories that should be removed
+	var deleteErrList []error
 	for _, history := range toRemove {
 		historyFile := filepath.Join(historyDir, history.Name)
 		if err := os.Remove(historyFile); err != nil && !os.IsNotExist(err) {
-				return errorWrap(err, "removing history file '"+historyFile+"'")
+			deleteErrList = append(deleteErrList, errorWrap(err, "removing history file '"+historyFile+"'"))
 		}
 		if err := os.Remove(historyFile + metaSuffix); err != nil && !os.IsNotExist(err) {
-				return errorWrap(err, "removing meta file")
+			deleteErrList = append(deleteErrList, errorWrap(err, "removing meta file for '"+historyFile+"'"))
 		}
 	}
+
+	if len(deleteErrList) > 0 {
+		if len(deleteErrList) == 1 {
+			return deleteErrList[0]
+		}
+		return errors.Join(deleteErrList...)
+	}
+
 	return nil
 }
 
@@ -929,6 +915,9 @@ func (f *FileKVStore) organizeHistoriesIfNeeded(key, historyDir string) error {
 	// Add histories from default directory
 	entries, err := os.ReadDir(historyDir)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // 如果历史目录不存在，无需处理
+		}
 		return errorWrap(err, "reading history path")
 	}
 	for _, entry := range entries {
@@ -936,34 +925,26 @@ func (f *FileKVStore) organizeHistoriesIfNeeded(key, historyDir string) error {
 			// Skip subdirectories for now, we'll process them separately
 			continue
 		}
+		if strings.HasSuffix(entry.Name(), metaSuffix) {
+			continue // Skip meta files
+		}
 		allHistories = append(allHistories, entry.Name())
 	}
-	// Sort by timestamp
+	// Sort by timestamp (oldest first)
 	sort.Slice(allHistories, func(i, j int) bool {
-		return allHistories[i] < allHistories[i]
+		return allHistories[i] < allHistories[j]
 	})
 
-
-	// 保留最新的一个在默认目录
-	allHistoriesForOrganizing := allHistories[:len(allHistories)-1]
-
-	if len(allHistoriesForOrganizing) <= maxHistoryCount {
-		return nil // 数量未超过限制，无需处理
+	// 保留最新的一个在默认目录（如果有历史记录）
+	allHistoriesForOrganizing := allHistories
+	if len(allHistoriesForOrganizing) > 1 {
+		allHistoriesForOrganizing = allHistoriesForOrganizing[:len(allHistoriesForOrganizing)-1]
 	}
 
-
 	// 按 maxHistoryCount 分组
-	for i := 0; (i+maxHistoryCount) <= len(allHistoriesForOrganizing); i += maxHistoryCount {
-		end := i + maxHistoryCount
-
-		pageHistories := allHistoriesForOrganizing[i:end]
-
-		// 使用该页最早的 timestamp 作为子目录名
-		minTime, err := strconv.ParseInt(pageHistories[0], 10, 64)
-		if err != nil {
-			return errorWrap(err, "invalid version file '"+pageHistories[0]+"'")
-		}
-		pageDirName := pagePrefix + strconv.FormatInt(minTime, 10)
+	for len(allHistoriesForOrganizing) >= maxHistoryCount  {
+		pageHistories := allHistoriesForOrganizing[:maxHistoryCount]
+		pageDirName := pagePrefix + pageHistories[0]
 		pageDirPath := filepath.Join(historyDir, pageDirName)
 
 		// 创建子目录
@@ -990,6 +971,7 @@ func (f *FileKVStore) organizeHistoriesIfNeeded(key, historyDir string) error {
 				}
 			}
 		}
+		allHistoriesForOrganizing = allHistoriesForOrganizing[200:]
 	}
 	return nil
 }
@@ -1034,15 +1016,98 @@ func (f *FileKVStore) walkAndOrganizeHistories(ctx context.Context) error {
 	return nil
 }
 
+// foreachHistories 遍历指定历史目录下的所有历史记录，对每个历史记录执行回调函数
+// historyDir: 历史记录目录
+// callback: 回调函数，接收历史记录的文件路径、版本号和文件状态，返回是否继续遍历和错误
+func (f *FileKVStore) foreachHistories(historyDir string, callback func(historyFile string, version string, info os.FileInfo) (bool, error)) []error {
+	var errList []error
+
+	// 读取历史目录
+	entries, err := os.ReadDir(historyDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		errList = append(errList, errorWrap(err, "reading history directory"))
+		return errList
+	}
+
+	for _, entry := range entries {
+		entryPath := filepath.Join(historyDir, entry.Name())
+		info, err := entry.Info()
+		if err != nil {
+			errList = append(errList, errorWrap(err, "getting file info for "+entryPath))
+			continue
+		}
+
+		if entry.IsDir() {
+			if strings.HasPrefix(entry.Name(), pagePrefix) {
+				// 处理子目录
+				subEntries, err := os.ReadDir(entryPath)
+				if err != nil {
+					errList = append(errList, errorWrap(err, "reading subdirectory "+entryPath))
+					continue
+				}
+
+				for _, subEntry := range subEntries {
+					subEntryPath := filepath.Join(entryPath, subEntry.Name())
+					subInfo, err := subEntry.Info()
+					if err != nil {
+						errList = append(errList, errorWrap(err, "getting file info for "+subEntryPath))
+						continue
+					}
+
+					if subEntry.IsDir() || strings.HasSuffix(subEntry.Name(), metaSuffix) {
+						continue
+					}
+
+					// 执行回调函数
+					continueTraverse, err := callback(subEntryPath, subEntry.Name(), subInfo)
+					if err != nil {
+						errList = append(errList, err)
+					}
+					if !continueTraverse {
+						return errList
+					}
+				}
+			}
+		} else {
+			if strings.HasSuffix(entry.Name(), metaSuffix) {
+				continue
+			}
+
+			// 执行回调函数
+			continueTraverse, err := callback(entryPath, entry.Name(), info)
+			if err != nil {
+				errList = append(errList, err)
+			}
+			if !continueTraverse {
+				return errList
+			}
+		}
+	}
+
+	return errList
+}
+
 // removeOrphanedHistories 删除孤立的历史记录（即对应键已不存在的历史记录）
 func (f *FileKVStore) removeOrphanedHistories(ctx context.Context, historyRoot string) error {
 	// Walk through the entire history directory tree
 	err := filepath.WalkDir(historyRoot, func(pa string, d fs.DirEntry, err error) error {
 		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
 			return errorWrap(err, "accessing path "+pa)
 		}
 		if !d.IsDir() {
 			return nil // Skip files
+		}
+		if strings.HasPrefix(d.Name(), ".") {
+			return nil // Skip the root history directory itself
+		}
+		if !strings.HasSuffix(d.Name(), historyDirSuffix) {
+			return nil
 		}
 
 		relPath, err := filepath.Rel(historyRoot, pa)
@@ -1051,11 +1116,6 @@ func (f *FileKVStore) removeOrphanedHistories(ctx context.Context, historyRoot s
 		}
 		if relPath == "." {
 			return nil // Skip the root history directory itself
-		}
-
-		// Check if this directory name ends with .h suffix
-		if !strings.HasSuffix(d.Name(), historyDirSuffix) {
-			return nil
 		}
 
 		// Extract the original key from the directory name
@@ -1082,7 +1142,7 @@ func (f *FileKVStore) removeOrphanedHistories(ctx context.Context, historyRoot s
 
 // hasHistories 检查指定键是否有历史记录，并根据 ignoreWarning 设置处理错误
 // 返回: hasHistory(bool), fatalErr(error)
-func (f *FileKVStore) hasHistories(historyDir, key string, errList *[]error) (bool, error) {	
+func (f *FileKVStore) hasHistories(historyDir, key string, errList *[]error) (bool, error) {
 	// 1. 检查历史目录是否存在
 	_, statErr := os.Stat(historyDir)
 	if statErr != nil {
@@ -1132,7 +1192,7 @@ func (f *FileKVStore) hasHistories(historyDir, key string, errList *[]error) (bo
 		if !strings.HasSuffix(entry.Name(), metaSuffix) {
 			return true, nil
 		}
-	}	
+	}
 	return false, nil
 }
 
@@ -1160,12 +1220,12 @@ func (f *FileKVStore) ensureHistoryForExistingKeys(ctx context.Context, historyR
 
 		historyDir := f.keyToHistoryPath(key)
 
-		hasHistory, fatalErr := f.hasHistories(key, historyDir, &errList)
+		hasHistory, fatalErr := f.hasHistories(historyDir, key, &errList)
 		if fatalErr != nil {
 			return fatalErr
 		}
 		if !hasHistory {
-			timestamp := time.Now().Unix()
+			timestamp := timex.Now().UnixNano()
 			_, createErr := f.ensureHistoryRecordExists(key, historyDir, timestamp)
 			if createErr != nil {
 				if f.ignoreWarning {
