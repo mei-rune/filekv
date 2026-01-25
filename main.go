@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/cabify/timex"
+	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
 type Version struct {
@@ -942,7 +944,7 @@ func (f *FileKVStore) organizeHistoriesIfNeeded(key, historyDir string) error {
 	}
 
 	// 按 maxHistoryCount 分组
-	for len(allHistoriesForOrganizing) >= maxHistoryCount  {
+	for len(allHistoriesForOrganizing) >= maxHistoryCount {
 		pageHistories := allHistoriesForOrganizing[:maxHistoryCount]
 		pageDirName := pagePrefix + pageHistories[0]
 		pageDirPath := filepath.Join(historyDir, pageDirName)
@@ -1368,81 +1370,108 @@ func (c *CachedFileKVStore) Fsck(ctx context.Context) error {
 	return c.store.Fsck(ctx)
 }
 
+// ImportedFile represents a file imported from git with its versions
+type ImportedFile struct {
+	GitCommitVersion string
+	Version          string
+}
+
 // Git import functionality
 type GitImportResult struct {
-	ImportedFiles int
+	ImportedFiles map[string][]ImportedFile
 	Errors        []error
 }
 
-// ImportGitRepo imports a git repository into the KV system
-func ImportGitRepo(ctx context.Context, store KeyValueStore, repoPath, targetPrefix string) (*GitImportResult, error) {
-	// result := &GitImportResult{}
-
-	// This would require importing go-git library which is not available here
-	// For demonstration purposes, we'll just return an error indicating the implementation
-	return nil, errors.New("git import functionality requires external dependency 'github.com/go-git/go-git/v5' which is not included in this implementation")
-}
-
-func main() {
-	// Example usage
-	store := NewFileKVStore("./data")
-
-	ctx := context.Background()
-
-	// Set a value
-	version, err := store.Set(ctx, "test/key", []byte("hello world"))
-	if err != nil {
-		println("Error setting value: " + err.Error())
-		return
+// ImportGitRepo imports a git repository into the KV system, including file history
+func ImportGitRepo(ctx context.Context, store KeyValueStore, gitdir string, filter func(ctx context.Context, file string) bool) (*GitImportResult, error) {
+	result := &GitImportResult{
+		ImportedFiles: make(map[string][]ImportedFile),
 	}
-	println("Set value with version: " + version)
 
-	// Get the value
-	value, err := store.Get(ctx, "test/key")
+	// Open the git repository
+	r, err := git.PlainOpen(gitdir)
 	if err != nil {
-		println("Error getting value: " + err.Error())
-		return
+		return nil, err
 	}
-	println("Got value: " + string(value))
 
-	// Get by version
-	valueByVersion, err := store.GetByVersion(ctx, "test/key", version)
+	// Get the HEAD reference
+	reference, err := r.Head()
 	if err != nil {
-		println("Error getting value by version: " + err.Error())
-		return
+		// Handle empty repo case
+		if err.Error() == "reference not found" {
+			// No commits yet, return empty result
+			return result, nil
+		}
+		return nil, err
 	}
-	println("Got value by version: " + string(valueByVersion))
 
-	// Get histories
-	histories, err := store.GetHistories(ctx, "test/key")
+	// Get the commit iterator
+	commitIter, err := r.Log(&git.LogOptions{
+		From: reference.Hash(),
+	})
 	if err != nil {
-		println("Error getting histories: " + err.Error())
-		return
+		return nil, err
 	}
-	println("Number of histories: " + strconv.Itoa(len(histories)))
 
-	// Get last version
-	lastVersion, err := store.GetLastVersion(ctx, "test/key")
+	// Collect all commits in reverse order (oldest to newest)
+	var commits []*object.Commit
+	err = commitIter.ForEach(func(c *object.Commit) error {
+		commits = append([]*object.Commit{c}, commits...) // Prepend to reverse order
+		return nil
+	})
 	if err != nil {
-		println("Error getting last version: " + err.Error())
-		return
+		return nil, err
 	}
-	println("Last version: " + lastVersion.Name)
 
-	// Test cached store
-	cachedStore := NewCachedFileKVStore(store)
-	valueFromCache, err := cachedStore.Get(ctx, "test/key")
-	if err != nil {
-		println("Error getting value from cache: " + err.Error())
-		return
-	}
-	println("Got value from cache: " + string(valueFromCache))
+	// Iterate through all commits from oldest to newest
+	for _, c := range commits {
+		// Get the tree from the commit
+		tree, err := c.Tree()
+		if err != nil {
+			result.Errors = append(result.Errors, err)
+			continue
+		}
 
-	// Run fsck
-	err = store.Fsck(ctx)
-	if err != nil {
-		println("Error running fsck: " + err.Error())
-		return
+		// Iterate through all files in the tree
+		err = tree.Files().ForEach(func(f *object.File) error {
+			// Get file path
+			filePath := f.Name
+
+			// Apply filter if provided
+			if filter != nil && !filter(ctx, filePath) {
+				return nil
+			}
+
+			// Read file content
+			content, err := f.Contents()
+			if err != nil {
+				result.Errors = append(result.Errors, err)
+				return nil
+			}
+
+			// Import into KV store
+			// Each Set call creates a new version in the KV store's history
+			kvVersion, err := store.Set(ctx, filePath, []byte(content))
+			if err != nil {
+				result.Errors = append(result.Errors, err)
+				return nil
+			}
+
+			// Record the imported file with its versions
+			importedFile := ImportedFile{
+				GitCommitVersion: c.Hash.String(),
+				Version:          kvVersion,
+			}
+
+			// Add to the result map
+			result.ImportedFiles[filePath] = append(result.ImportedFiles[filePath], importedFile)
+
+			return nil
+		})
+		if err != nil {
+			result.Errors = append(result.Errors, err)
+		}
 	}
-	println("Fsck completed successfully")
+
+	return result, nil
 }
