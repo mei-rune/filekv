@@ -209,7 +209,7 @@ func TestFileKVStore_Fsck_CreateMissingHistories(t *testing.T) {
 // 测试 Fsck 功能：历史记录过多，需要组织成子目录
 func TestFileKVStore_Fsck_OrganizeHistories(t *testing.T) {
 	// 创建临时目录
-	tempDir, err := os.MkdirTemp("d:\\", "filekv-fsck-organize-test")
+	tempDir, err := os.MkdirTemp("", "filekv-fsck-organize-test")
 	if err != nil {
 		t.Fatal(err)
 	}
