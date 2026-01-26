@@ -14,8 +14,6 @@ import (
 	"time"
 
 	"github.com/cabify/timex"
-	"github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
 type Version struct {
@@ -47,6 +45,15 @@ type KeyValueStore interface {
 	// 返回值：新版本号（如果值与上次相同则返回空串）和错误信息
 	// 当 value 和上次相等时，不保存，不产生历史记录，返回值中 version 返回空串
 	Set(ctx context.Context, key string, value []byte) (version string, err error)
+
+	// SetWithTimestamp 设置键的值，使用指定的时间戳作为版本号
+	// ctx: 上下文，用于取消或超时控制
+	// key: 键名
+	// value: 要设置的值
+	// timestamp: 时间戳，单位为纳秒
+	// 返回值：新版本号（如果值与上次相同则返回空串）和错误信息
+	// 当 value 和上次相等时，不保存，不产生历史记录，返回值中 version 返回空串
+	SetWithTimestamp(ctx context.Context, key string, value []byte, timestamp int64) (version string, err error)
 
 	// SetMeta 设置键的元数据
 	// ctx: 上下文，用于取消或超时控制
@@ -334,6 +341,10 @@ func (f *FileKVStore) GetByVersion(ctx context.Context, key string, version stri
 }
 
 func (f *FileKVStore) Set(ctx context.Context, key string, value []byte) (string, error) {
+	return f.SetWithTimestamp(ctx, key, value, timex.Now().UnixNano())
+}
+
+func (f *FileKVStore) SetWithTimestamp(ctx context.Context, key string, value []byte, timestamp int64) (string, error) {
 	if err := f.validateKey(key); err != nil {
 		return "", err
 	}
@@ -342,69 +353,61 @@ func (f *FileKVStore) Set(ctx context.Context, key string, value []byte) (string
 
 	// Read existing value to compare
 	existingValue, err := os.ReadFile(dataFile)
-	if err != nil && !os.IsNotExist(err) {
-		return "", errorWrap(err, "reading file for comparison")
+	var shouldCreateHistory bool
+	if err != nil {
+		if os.IsNotExist(err) {
+			// File doesn't exist, need to create history
+			shouldCreateHistory = true
+		} else {
+			return "", errorWrap(err, "reading file for comparison")
+		}
+	} else {
+		// File exists, check if content has changed
+		shouldCreateHistory = !bytes.Equal(existingValue, value)
 	}
 
-	// If value is the same, don't create new history
-	if bytes.Equal(existingValue, value) {
+	// Create history record if needed
+	timestampStr := strconv.FormatInt(timestamp, 10)
+	historyDir := f.keyToHistoryPath(key)
+	var historyFile string
+
+	// Ensure data directory exists before writing
+	if err := os.MkdirAll(filepath.Dir(dataFile), 0755); err != nil {
+		return "", errorWrap(err, "creating data directory")
+	}
+
+	// Write new value
+	if err := os.WriteFile(dataFile, value, 0644); err != nil {
+		return "", errorWrap(err, "writing file")
+	}
+
+	// If content hasn't changed, return empty version string
+	if !shouldCreateHistory {
 		return "", nil
 	}
 
-	// Create history record
-	// 使用纳秒级时间戳，确保每个历史记录都有唯一的文件名
-	timestamp := strconv.FormatInt(timex.Now().UnixNano(), 10)
-	historyDir := f.keyToHistoryPath(key)
-	historyFile := filepath.Join(historyDir, timestamp)
-
-	// Write new value
-	err = os.WriteFile(dataFile, value, 0644)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			return "", errorWrap(err, "writing file")
-		}
-
-		// Directory doesn't exist, create it and retry
-		if mkdirErr := os.MkdirAll(filepath.Dir(dataFile), 0755); mkdirErr != nil {
-			return "", errorWrap(mkdirErr, "creating directory")
-		}
-
-		// Retry writing the file after creating the directory
-		err = os.WriteFile(dataFile, value, 0644)
-		if err != nil {
-			return "", errorWrap(err, "writing file")
-		}
-
-		// Directory doesn't exist, create it and retry
-		mkdirErr := os.MkdirAll(historyDir, 0755)
-		if mkdirErr != nil {
-			if !f.ignoreWarning {
-				return "", errorWrap(mkdirErr, "creating history directory")
-			}
-		}
+	// Ensure history directory exists before writing history
+	if err := os.MkdirAll(historyDir, 0755); err != nil {
+		return "", errorWrap(err, "creating history directory")
 	}
 
-	err = os.WriteFile(historyFile, value, 0644)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			return "", errorWrap(err, "writing history file")
+	// Ensure history file name is unique
+	counter := 0
+	historyFile = filepath.Join(historyDir, timestampStr)
+	for {
+		if _, err := os.Stat(historyFile); os.IsNotExist(err) {
+			break
 		}
-		// Directory doesn't exist, create it and retry
-		mkdirErr := os.MkdirAll(historyDir, 0755)
-		if mkdirErr != nil {
-			if !f.ignoreWarning {
-				return "", errorWrap(mkdirErr, "creating history directory")
-			}
-		} else {
-			// Retry writing the file after creating the directory
-			err = os.WriteFile(historyFile, value, 0644)
-			if err != nil {
-				return "", errorWrap(err, "writing history file")
-			}
-		}
+		counter++
+		historyFile = filepath.Join(historyDir, timestampStr+"_"+strconv.Itoa(counter))
 	}
 
-	return timestamp, nil
+	// Write to history file
+	if err := os.WriteFile(historyFile, value, 0644); err != nil {
+		return "", errorWrap(err, "writing history file")
+	}
+
+	return timestampStr, nil
 }
 
 func (f *FileKVStore) ensureHistoryRecordExists(key, historyDir string, timestamp int64) (string, error) {
@@ -904,17 +907,17 @@ func (f *FileKVStore) GetNextVersion(ctx context.Context, key, revision string) 
 
 	// Find the target version index
 	targetIndex := -1
-		// Find the index of the specified revision
-		for i, v := range histories {
-			if v.Version == revision {
-				targetIndex = i
-				break
-			}
+	// Find the index of the specified revision
+	for i, v := range histories {
+		if v.Version == revision {
+			targetIndex = i
+			break
 		}
+	}
 
-		if targetIndex == -1 {
-			return nil, errorWrap(os.ErrNotExist, "version '"+revision+"' not found for key '"+key+"'")
-		}
+	if targetIndex == -1 {
+		return nil, errorWrap(os.ErrNotExist, "version '"+revision+"' not found for key '"+key+"'")
+	}
 
 	// Get the next version
 	if targetIndex == len(histories)-1 {
@@ -1329,13 +1332,20 @@ func (c *CachedFileKVStore) GetByVersion(ctx context.Context, key string, versio
 }
 
 func (c *CachedFileKVStore) Set(ctx context.Context, key string, value []byte) (string, error) {
-	version, err := c.store.Set(ctx, key, value)
+	return c.SetWithTimestamp(ctx, key, value, timex.Now().UnixNano())
+}
+
+func (c *CachedFileKVStore) SetWithTimestamp(ctx context.Context, key string, value []byte, timestamp int64) (string, error) {
+	version, err := c.store.SetWithTimestamp(ctx, key, value, timestamp)
 	if err != nil {
 		return "", err
 	}
 
-	// Update cache if successful
-	c.cache[key] = value
+	// Update cache if version is not empty (meaning value changed)
+	if version != "" {
+		c.cache[key] = value
+	}
+
 	return version, nil
 }
 
@@ -1397,110 +1407,4 @@ func (c *CachedFileKVStore) CleanupHistoriesByCount(ctx context.Context, key str
 
 func (c *CachedFileKVStore) Fsck(ctx context.Context) error {
 	return c.store.Fsck(ctx)
-}
-
-// ImportedFile represents a file imported from git with its versions
-type ImportedFile struct {
-	GitCommitVersion string
-	Version          string
-}
-
-// Git import functionality
-type GitImportResult struct {
-	ImportedFiles map[string][]ImportedFile
-	Errors        []error
-}
-
-// ImportGitRepo imports a git repository into the KV system, including file history
-func ImportGitRepo(ctx context.Context, store KeyValueStore, gitdir string, filter func(ctx context.Context, file string) bool) (*GitImportResult, error) {
-	result := &GitImportResult{
-		ImportedFiles: make(map[string][]ImportedFile),
-	}
-
-	// Open the git repository
-	r, err := git.PlainOpen(gitdir)
-	if err != nil {
-		return nil, err
-	}
-
-	// Get the HEAD reference
-	reference, err := r.Head()
-	if err != nil {
-		// Handle empty repo case
-		if err.Error() == "reference not found" {
-			// No commits yet, return empty result
-			return result, nil
-		}
-		return nil, err
-	}
-
-	// Get the commit iterator
-	commitIter, err := r.Log(&git.LogOptions{
-		From: reference.Hash(),
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	// Collect all commits in reverse order (oldest to newest)
-	var commits []*object.Commit
-	err = commitIter.ForEach(func(c *object.Commit) error {
-		commits = append([]*object.Commit{c}, commits...) // Prepend to reverse order
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	// Iterate through all commits from oldest to newest
-	for _, c := range commits {
-		// Get the tree from the commit
-		tree, err := c.Tree()
-		if err != nil {
-			result.Errors = append(result.Errors, err)
-			continue
-		}
-
-		// Iterate through all files in the tree
-		err = tree.Files().ForEach(func(f *object.File) error {
-			// Get file path
-			filePath := f.Name
-
-			// Apply filter if provided
-			if filter != nil && !filter(ctx, filePath) {
-				return nil
-			}
-
-			// Read file content
-			content, err := f.Contents()
-			if err != nil {
-				result.Errors = append(result.Errors, err)
-				return nil
-			}
-
-			// Import into KV store
-			// Each Set call creates a new version in the KV store's history
-			kvVersion, err := store.Set(ctx, filePath, []byte(content))
-			if err != nil {
-				result.Errors = append(result.Errors, err)
-				return nil
-			}
-
-			// Record the imported file with its versions
-			importedFile := ImportedFile{
-				GitCommitVersion: c.Hash.String(),
-				Version:          kvVersion,
-			}
-
-			// Add to the result map
-			result.ImportedFiles[filePath] = append(result.ImportedFiles[filePath], importedFile)
-
-			return nil
-		})
-		if err != nil {
-			result.Errors = append(result.Errors, err)
-		}
-	}
-
-	return result, nil
 }

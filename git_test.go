@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing/object"
@@ -73,6 +74,8 @@ func TestImportGitRepo(t *testing.T) {
 		t.Fatalf("Failed to commit: %v", err)
 	}
 
+	// 等待一段时间，确保两次提交的时间戳不同
+	time.Sleep(100 * time.Millisecond)
 	// 第二次提交：修改文件
 	err = ioutil.WriteFile(filepath.Join(repoDir, "file1.txt"), []byte("content1-updated"), 0644)
 	if err != nil {
@@ -94,6 +97,8 @@ func TestImportGitRepo(t *testing.T) {
 		t.Fatalf("Failed to commit: %v", err)
 	}
 
+	// 等待一段时间，确保两次提交的时间戳不同
+	time.Sleep(100 * time.Millisecond)
 	// 第三次提交：添加新文件
 	err = ioutil.WriteFile(filepath.Join(repoDir, "file4.txt"), []byte("content4"), 0644)
 	if err != nil {
@@ -115,6 +120,8 @@ func TestImportGitRepo(t *testing.T) {
 		t.Fatalf("Failed to commit: %v", err)
 	}
 
+	// 等待一段时间，确保两次提交的时间戳不同
+	time.Sleep(100 * time.Millisecond)
 	// 第四次提交：修改多个文件
 	err = ioutil.WriteFile(filepath.Join(repoDir, "dir1/file2.txt"), []byte("content2-updated"), 0644)
 	if err != nil {
@@ -303,7 +310,7 @@ func TestImportGitRepoWithFilter(t *testing.T) {
 	ctx := context.Background()
 
 	// 定义过滤器：只导入 .txt 文件
-	filter := func(ctx context.Context, file string) bool {
+	filter := func(ctx context.Context, file string, timestamp time.Time) bool {
 		return filepath.Ext(file) == ".txt"
 	}
 
