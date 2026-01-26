@@ -100,6 +100,12 @@ type KeyValueStore interface {
 	// version: 版本号，当为 "head" 时表示获取最新版本
 	GetPrevVersion(ctx context.Context, key, revision string) (*Version, error)
 
+	// GetNextVersion 获取键的指定版本的下一个版本信息
+	// ctx: 上下文，用于取消或超时控制
+	// key: 键名
+	// version: 版本号，当为 "head" 时表示获取最新版本
+	GetNextVersion(ctx context.Context, key, revision string) (*Version, error)
+
 	// CleanupHistoriesByTime 清理指定时间之前的旧历史记录
 	// ctx: 上下文，用于取消或超时控制
 	// key: 键名
@@ -876,6 +882,49 @@ func (f *FileKVStore) GetPrevVersion(ctx context.Context, key, revision string) 
 	return &histories[targetIndex-1], nil
 }
 
+func (f *FileKVStore) GetNextVersion(ctx context.Context, key, revision string) (*Version, error) {
+	if revision == "head" || revision == "HEAD" {
+		return nil, errorWrap(os.ErrNotExist, "no next version found")
+	}
+
+	if err := f.validateKey(key); err != nil {
+		return nil, err
+	}
+
+	historyDir := f.keyToHistoryPath(key)
+
+	// Get all histories (using readHistories instead of GetHistories for better performance)
+	histories, err := f.readHistories(ctx, historyDir)
+	if err != nil {
+		return nil, err
+	}
+	if len(histories) == 0 {
+		return nil, errorWrap(os.ErrNotExist, "no history found for key '"+key+"'")
+	}
+
+	// Find the target version index
+	targetIndex := -1
+		// Find the index of the specified revision
+		for i, v := range histories {
+			if v.Version == revision {
+				targetIndex = i
+				break
+			}
+		}
+
+		if targetIndex == -1 {
+			return nil, errorWrap(os.ErrNotExist, "version '"+revision+"' not found for key '"+key+"'")
+		}
+
+	// Get the next version
+	if targetIndex == len(histories)-1 {
+		// No next version
+		return nil, errorWrap(os.ErrNotExist, "no next version found")
+	}
+
+	return &histories[targetIndex+1], nil
+}
+
 func (f *FileKVStore) CleanupHistoriesByTime(ctx context.Context, key string, maxAge time.Duration) error {
 	if err := f.validateKey(key); err != nil {
 		return err
@@ -1332,6 +1381,10 @@ func (c *CachedFileKVStore) GetLastVersion(ctx context.Context, key string) (*Ve
 
 func (c *CachedFileKVStore) GetPrevVersion(ctx context.Context, key, revision string) (*Version, error) {
 	return c.store.GetPrevVersion(ctx, key, revision)
+}
+
+func (c *CachedFileKVStore) GetNextVersion(ctx context.Context, key, revision string) (*Version, error) {
+	return c.store.GetNextVersion(ctx, key, revision)
 }
 
 func (c *CachedFileKVStore) CleanupHistoriesByTime(ctx context.Context, key string, maxAge time.Duration) error {

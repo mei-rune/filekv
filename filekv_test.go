@@ -361,6 +361,121 @@ func TestFileKVStore_GetPrevVersion(t *testing.T) {
 	})
 }
 
+func TestFileKVStore_GetNextVersion(t *testing.T) {
+	// 创建临时目录
+	tempDir, err := os.MkdirTemp("", "filekv-nextversion-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// 创建 FileKVStore 实例
+	store := NewFileKVStore(tempDir)
+	ctx := context.Background()
+
+	key := "test/nextversion"
+
+	// 使用 timextest.Mocked 模拟时间
+	initialTime := time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC)
+	timextest.Mocked(initialTime, func(mockedtimex *timextest.TestImplementation) {
+		// 添加多个版本的历史记录
+		versions := []string{}
+		for i := 0; i < 5; i++ {
+			value := []byte("version " + string(rune('0'+i)))
+			version, err := store.Set(ctx, key, value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			versions = append(versions, version)
+			// 递增模拟时间，确保每个版本都有不同的时间戳
+			mockedtimex.SetNow(mockedtimex.Now().Add(time.Second))
+		}
+
+		// 测试获取指定版本的下一个版本
+		t.Run("GetNextVersion_SpecificVersion", func(t *testing.T) {
+			// 获取第 2 个版本（索引 1）的下一个版本
+			targetVersion := versions[1]
+			nextVersion, err := store.GetNextVersion(ctx, key, targetVersion)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if nextVersion == nil {
+				t.Fatal("expected next version, got nil")
+			}
+			if nextVersion.Version != versions[2] {
+				t.Fatalf("expected next version %q, got %q", versions[2], nextVersion.Version)
+			}
+		})
+
+		// 测试获取第一个版本的下一个版本
+		t.Run("GetNextVersion_FirstVersion", func(t *testing.T) {
+			firstVersion := versions[0]
+			nextVersion, err := store.GetNextVersion(ctx, key, firstVersion)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if nextVersion == nil {
+				t.Fatal("expected next version, got nil")
+			}
+			if nextVersion.Version != versions[1] {
+				t.Fatalf("expected next version %q, got %q", versions[1], nextVersion.Version)
+			}
+		})
+
+		// 测试获取最新版本的下一个版本（应该返回错误）
+		t.Run("GetNextVersion_LastVersion", func(t *testing.T) {
+			lastVersion := versions[4]
+			nextVersion, err := store.GetNextVersion(ctx, key, lastVersion)
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if nextVersion != nil {
+				t.Fatalf("expected nil, got %v", nextVersion)
+			}
+		})
+
+		// 测试获取不存在的版本的下一个版本（应该返回错误）
+		t.Run("GetNextVersion_NonExistentVersion", func(t *testing.T) {
+			nextVersion, err := store.GetNextVersion(ctx, key, "non-existent-version")
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if nextVersion != nil {
+				t.Fatalf("expected nil, got %v", nextVersion)
+			}
+		})
+
+		// 测试对只有一个版本的键调用 GetNextVersion（应该返回错误）
+		t.Run("GetNextVersion_OnlyOneVersion", func(t *testing.T) {
+			singleVersionKey := "test/singleversion"
+			value := []byte("single version")
+			_, err := store.Set(ctx, singleVersionKey, value)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			nextVersion, err := store.GetNextVersion(ctx, singleVersionKey, "head")
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if nextVersion != nil {
+				t.Fatalf("expected nil, got %v", nextVersion)
+			}
+		})
+
+		// 测试使用 HEAD 参数获取下一个版本（应该返回错误）
+		t.Run("GetNextVersion_Head", func(t *testing.T) {
+			nextVersion, err := store.GetNextVersion(ctx, key, "head")
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if nextVersion != nil {
+				t.Fatalf("expected nil, got %v", nextVersion)
+			}
+		})
+	})
+}
+
 func TestFileKVStore_MetaOperations(t *testing.T) {
 	// 创建临时目录
 	tempDir, err := os.MkdirTemp("", "filekv-meta-test")
