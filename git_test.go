@@ -2,6 +2,7 @@ package filekv
 
 import (
 	"context"
+	"fmt"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -11,6 +12,15 @@ import (
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
+
+var now = time.Now()
+var seed = 0
+
+func nowTime() time.Time {
+	seed += 1
+	t := now.Add(time.Duration(seed) * time.Second)
+	return t
+}
 
 // TestImportGitRepo 测试基本的 git 仓库导入功能
 func TestImportGitRepo(t *testing.T) {
@@ -39,120 +49,97 @@ func TestImportGitRepo(t *testing.T) {
 		t.Fatalf("Failed to get worktree: %v", err)
 	}
 
-	// 第一次提交：添加初始文件
-	testFiles := map[string]string{
-		"file1.txt":           "content1",
-		"dir1/file2.txt":      "content2",
-		"dir1/dir2/file3.txt": "content3",
-	}
+	for _, testcase := range []struct {
+		files      map[string]string
+		commit     string
+		commitOpts *git.CommitOptions
+	}{
+		// 第一次提交：添加初始文件
+		{
+			files: map[string]string{
+				"file1.txt":           "content1",
+				"dir1/file2.txt":      "content2",
+				"dir1/dir2/file3.txt": "content3",
+			},
+			commit: "Initial commit",
+			commitOpts: &git.CommitOptions{
+				Author: &object.Signature{
+					Name:  "Test Author",
+					Email: "test@example.com",
+					When:  nowTime(),
+				},
+			},
+		},
 
-	// 创建文件并添加到 git
-	for path, content := range testFiles {
-		fullPath := filepath.Join(repoDir, path)
-		err := os.MkdirAll(filepath.Dir(fullPath), 0755)
-		if err != nil {
-			t.Fatalf("Failed to create file dir: %v", err)
+		// 第二次提交：修改文件
+		{
+			files: map[string]string{
+				"file1.txt": "content1-updated",
+			},
+			commit: "Update file1.txt",
+			commitOpts: &git.CommitOptions{
+				Author: &object.Signature{
+					Name:  "Test Author",
+					Email: "test@example.com",
+					When:  nowTime(),
+				},
+			},
+		},
+
+		// 第三次提交：添加新文件
+		{
+			files: map[string]string{
+				"file4.txt": "content4",
+			},
+			commit: "Add file4.txt",
+			commitOpts: &git.CommitOptions{
+				Author: &object.Signature{
+					Name:  "Test Author",
+					Email: "test@example.com",
+					When:  nowTime(),
+				},
+			},
+		},
+
+		// 第四次提交：修改多个文件
+		{
+			files: map[string]string{
+				"dir1/file2.txt": "content2-updated",
+				"file4.txt":      "content4-updated",
+			},
+			commit: "Update multiple files",
+			commitOpts: &git.CommitOptions{
+				Author: &object.Signature{
+					Name:  "Test Author",
+					Email: "test@example.com",
+					When:  nowTime(),
+				},
+			},
+		},
+	} {
+		for path, content := range testcase.files {
+			fullPath := filepath.Join(repoDir, path)
+			err := os.MkdirAll(filepath.Dir(fullPath), 0755)
+			if err != nil {
+				t.Fatalf("Failed to create file dir: %v", err)
+			}
+			err = ioutil.WriteFile(fullPath, []byte(content), 0644)
+			if err != nil {
+				t.Fatalf("Failed to write file: %v", err)
+			}
+			_, err = wt.Add(path)
+			if err != nil {
+				t.Fatalf("Failed to add file to git: %v", err)
+			}
 		}
-		err = ioutil.WriteFile(fullPath, []byte(content), 0644)
+		_, err = wt.Commit(testcase.commit, testcase.commitOpts)
 		if err != nil {
-			t.Fatalf("Failed to write file: %v", err)
+			t.Fatalf("Failed to commit: %v", err)
 		}
-		_, err = wt.Add(path)
-		if err != nil {
-			t.Fatalf("Failed to add file to git: %v", err)
-		}
-	}
-
-	// 第一次提交
-	_, err = wt.Commit("Initial commit", &git.CommitOptions{
-		Author: &object.Signature{
-			Name:  "Test Author",
-			Email: "test@example.com",
-		},
-	})
-	if err != nil {
-		t.Fatalf("Failed to commit: %v", err)
-	}
-
-	// 等待一段时间，确保两次提交的时间戳不同
-	time.Sleep(100 * time.Millisecond)
-	// 第二次提交：修改文件
-	err = ioutil.WriteFile(filepath.Join(repoDir, "file1.txt"), []byte("content1-updated"), 0644)
-	if err != nil {
-		t.Fatalf("Failed to update file: %v", err)
-	}
-	_, err = wt.Add("file1.txt")
-	if err != nil {
-		t.Fatalf("Failed to add file to git: %v", err)
-	}
-
-	// 第二次提交
-	_, err = wt.Commit("Update file1.txt", &git.CommitOptions{
-		Author: &object.Signature{
-			Name:  "Test Author",
-			Email: "test@example.com",
-		},
-	})
-	if err != nil {
-		t.Fatalf("Failed to commit: %v", err)
-	}
-
-	// 等待一段时间，确保两次提交的时间戳不同
-	time.Sleep(100 * time.Millisecond)
-	// 第三次提交：添加新文件
-	err = ioutil.WriteFile(filepath.Join(repoDir, "file4.txt"), []byte("content4"), 0644)
-	if err != nil {
-		t.Fatalf("Failed to create file: %v", err)
-	}
-	_, err = wt.Add("file4.txt")
-	if err != nil {
-		t.Fatalf("Failed to add file to git: %v", err)
-	}
-
-	// 第三次提交
-	_, err = wt.Commit("Add file4.txt", &git.CommitOptions{
-		Author: &object.Signature{
-			Name:  "Test Author",
-			Email: "test@example.com",
-		},
-	})
-	if err != nil {
-		t.Fatalf("Failed to commit: %v", err)
-	}
-
-	// 等待一段时间，确保两次提交的时间戳不同
-	time.Sleep(100 * time.Millisecond)
-	// 第四次提交：修改多个文件
-	err = ioutil.WriteFile(filepath.Join(repoDir, "dir1/file2.txt"), []byte("content2-updated"), 0644)
-	if err != nil {
-		t.Fatalf("Failed to update file: %v", err)
-	}
-	err = ioutil.WriteFile(filepath.Join(repoDir, "file4.txt"), []byte("content4-updated"), 0644)
-	if err != nil {
-		t.Fatalf("Failed to update file: %v", err)
-	}
-	_, err = wt.Add("dir1/file2.txt")
-	if err != nil {
-		t.Fatalf("Failed to add file to git: %v", err)
-	}
-	_, err = wt.Add("file4.txt")
-	if err != nil {
-		t.Fatalf("Failed to add file to git: %v", err)
-	}
-
-	// 第四次提交
-	_, err = wt.Commit("Update multiple files", &git.CommitOptions{
-		Author: &object.Signature{
-			Name:  "Test Author",
-			Email: "test@example.com",
-		},
-	})
-	if err != nil {
-		t.Fatalf("Failed to commit: %v", err)
 	}
 
 	// 更新测试文件映射，包含所有文件
-	testFiles = map[string]string{
+	testFiles := map[string]string{
 		"file1.txt":           "content1-updated",
 		"dir1/file2.txt":      "content2-updated",
 		"dir1/dir2/file3.txt": "content3",
@@ -177,15 +164,15 @@ func TestImportGitRepo(t *testing.T) {
 
 	// 验证每个文件的导入版本数量（每个文件在每次提交中都会被导入，所以数量等于包含该文件的提交数量）
 	expectedImportedVersions := map[string]int{
-		"file1.txt":           4, // 4次提交都包含file1.txt
-		"dir1/file2.txt":      4, // 4次提交都包含dir1/file2.txt
-		"dir1/dir2/file3.txt": 4, // 4次提交都包含dir1/dir2/file3.txt
+		"file1.txt":           2, // 3次提交都包含file1.txt
+		"dir1/file2.txt":      2, // 2次提交都包含dir1/file2.txt
+		"dir1/dir2/file3.txt": 1, // 1次提交都包含dir1/dir2/file3.txt
 		"file4.txt":           2, // 2次提交包含file4.txt (Add file4.txt + Update multiple files)
 	}
 
 	// 验证每个文件在KV存储中的历史记录数量（只有当文件内容变化时才会创建新的历史记录）
 	expectedKVHistories := map[string]int{
-		"file1.txt":           2, // 被修改2次（初始 + 第2次提交修改）
+		"file1.txt":           2, // 被修改3次（初始 + 第2次提交修改）
 		"dir1/file2.txt":      2, // 被修改2次（初始 + 第4次提交修改）
 		"dir1/dir2/file3.txt": 1, // 未被修改（只有初始版本）
 		"file4.txt":           2, // 被修改2次（初始添加 + 第4次提交修改）
@@ -227,6 +214,11 @@ func TestImportGitRepo(t *testing.T) {
 	file1Histories, err := store.GetHistories(ctx, "file1.txt")
 	if err != nil {
 		t.Fatalf("Failed to get histories for file1.txt: %v", err)
+	}
+	for _, v := range file1Histories {
+		t.Log("", v)
+		oldContent, err := store.GetByVersion(ctx, "file1.txt", v.Name)
+		fmt.Println("====", string(oldContent), err)
 	}
 	if len(file1Histories) >= 1 {
 		// 获取最早的版本

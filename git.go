@@ -1,6 +1,7 @@
 package filekv
 
 import (
+	"bytes"
 	"context"
 	"time"
 )
@@ -17,8 +18,16 @@ type GitImportResult struct {
 	Errors        []error
 }
 
+// ImportProgressCallback is a callback function for import progress updates
+type ImportProgressCallback func(ctx context.Context, phase string, current int, total int, message string)
+
 // ImportGitRepo imports a git repository into the KV system, including file history
-func ImportGitRepo(ctx context.Context, store KeyValueStore, gitdir string, filter func(ctx context.Context, file string, timestamp time.Time) bool) (*GitImportResult, error) {
+func ImportGitRepo(ctx context.Context, store KeyValueStore, gitdir string, filter func(ctx context.Context, file string, timestamp time.Time) bool, progressCallback ...ImportProgressCallback) (*GitImportResult, error) {
+	// Get progressCallback if provided
+	var callback ImportProgressCallback
+	if len(progressCallback) > 0 {
+		callback = progressCallback[0]
+	}
 	result := &GitImportResult{
 		ImportedFiles: make(map[string][]ImportedFile),
 	}
@@ -40,10 +49,34 @@ func ImportGitRepo(ctx context.Context, store KeyValueStore, gitdir string, filt
 		return nil, err
 	}
 
-	// Get the commit iterator
-	commitIter, err := r.Log(&GitLogOptions{
+	// Set GitLogOptions
+	logOptions := &GitLogOptions{
 		From: reference.Hash(),
+	}
+
+	// Get the commit iterator
+	commitIter, err := r.Log(logOptions)
+	if err != nil {
+		return nil, err
+	}
+
+	// First pass: Count total commits
+	totalCommits := 0
+	err = commitIter.ForEach(func(c *GitCommit) error {
+		totalCommits++
+		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Notify progress: starting to collect commits
+	if callback != nil {
+		callback(ctx, "collecting", 0, 0, "Starting to collect commits")
+	}
+
+	// Reset commitIter to collect commits
+	commitIter, err = r.Log(logOptions)
 	if err != nil {
 		return nil, err
 	}
@@ -52,19 +85,51 @@ func ImportGitRepo(ctx context.Context, store KeyValueStore, gitdir string, filt
 	var commits []*GitCommit
 	err = commitIter.ForEach(func(c *GitCommit) error {
 		commits = append(commits, c) // Append to forward order
+
+		// Notify progress: finished collecting commits
+		if callback != nil {
+			callback(ctx, "collecting", len(commits), totalCommits, "collecting commits")
+		}
+
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 
+	// Notify progress: finished collecting commits
+	if callback != nil {
+		callback(ctx, "collecting", 0, 0, "Finished collecting commits")
+	}
+
 	// Reverse the commits to get oldest to newest
+	if callback != nil {
+		callback(ctx, "sorting", 0, 0, "Sorting commits by time")
+	}
+
 	for i, j := 0, len(commits)-1; i < j; i, j = i+1, j-1 {
 		commits[i], commits[j] = commits[j], commits[i]
 	}
 
+	if callback != nil {
+		callback(ctx, "sorting", 0, 0, "Finished sorting commits")
+	}
+
+	// Map to track the last content of each file
+	lastContent := make(map[string][]byte)
+
 	// Iterate through all commits from oldest to newest
-	for _, c := range commits {
+	if callback != nil {
+		callback(ctx, "processing", 0, 0, "Starting to process commits")
+	}
+
+	for idx, c := range commits {
+
+		// Iterate through all commits from oldest to newest
+		if callback != nil {
+			callback(ctx, "processing", idx, len(commits), "process commit")
+		}
+
 		// Get the tree from the commit
 		tree, err := c.Tree()
 		if err != nil {
@@ -89,28 +154,40 @@ func ImportGitRepo(ctx context.Context, store KeyValueStore, gitdir string, filt
 				return nil
 			}
 
-			// Import into KV store
-			// Each SetWithTimestamp call creates a new version with git commit time as timestamp
-			kvVersion, err := store.SetWithTimestamp(ctx, filePath, []byte(content), c.Committer.When.UnixNano())
-			if err != nil {
-				result.Errors = append(result.Errors, err)
-				return nil
-			}
+			contentBytes := []byte(content)
 
-			// Record the imported file with its versions
-			importedFile := ImportedFile{
-				GitCommitVersion: c.Hash.String(),
-				Version:          kvVersion,
-			}
+			// Check if content has changed
+			if lastBytes, ok := lastContent[filePath]; !ok || !bytes.Equal(lastBytes, contentBytes) {
+				// Content has changed, create history record
+				kvVersion, err := store.SetWithTimestamp(ctx, filePath, contentBytes, c.Committer.When.UnixNano())
+				if err != nil {
+					result.Errors = append(result.Errors, err)
+					return nil
+				}
 
-			// Add to the result map
-			result.ImportedFiles[filePath] = append(result.ImportedFiles[filePath], importedFile)
+				// Record the imported file with its versions
+				importedFile := ImportedFile{
+					GitCommitVersion: c.Hash.String(),
+					Version:          kvVersion,
+				}
+
+				// Add to the result map
+				result.ImportedFiles[filePath] = append(result.ImportedFiles[filePath], importedFile)
+
+				// Update last content
+				lastContent[filePath] = contentBytes
+			}
 
 			return nil
 		})
 		if err != nil {
 			result.Errors = append(result.Errors, err)
 		}
+	}
+
+	// Notify progress: finished importing
+	if callback != nil {
+		callback(ctx, "finished", 0, 0, "Finished importing git repository")
 	}
 
 	return result, nil

@@ -353,58 +353,65 @@ func (f *FileKVStore) SetWithTimestamp(ctx context.Context, key string, value []
 
 	// Read existing value to compare
 	existingValue, err := os.ReadFile(dataFile)
-	var shouldCreateHistory bool
-	if err != nil {
-		if os.IsNotExist(err) {
-			// File doesn't exist, need to create history
-			shouldCreateHistory = true
-		} else {
-			return "", errorWrap(err, "reading file for comparison")
-		}
-	} else {
-		// File exists, check if content has changed
-		shouldCreateHistory = !bytes.Equal(existingValue, value)
+	if err != nil && !os.IsNotExist(err) {
+		return "", errorWrap(err, "reading file for comparison")
 	}
 
-	// Create history record if needed
-	timestampStr := strconv.FormatInt(timestamp, 10)
-	historyDir := f.keyToHistoryPath(key)
-	var historyFile string
-
-	// Ensure data directory exists before writing
-	if err := os.MkdirAll(filepath.Dir(dataFile), 0755); err != nil {
-		return "", errorWrap(err, "creating data directory")
-	}
-
-	// Write new value
-	if err := os.WriteFile(dataFile, value, 0644); err != nil {
-		return "", errorWrap(err, "writing file")
-	}
-
-	// If content hasn't changed, return empty version string
-	if !shouldCreateHistory {
+	// If value is the same, don't create new history
+	if bytes.Equal(existingValue, value) {
 		return "", nil
 	}
 
-	// Ensure history directory exists before writing history
-	if err := os.MkdirAll(historyDir, 0755); err != nil {
-		return "", errorWrap(err, "creating history directory")
-	}
+	// Create history record
+	timestampStr := strconv.FormatInt(timestamp, 10)
+	historyDir := f.keyToHistoryPath(key)
+	historyFile := filepath.Join(historyDir, timestampStr)
 
-	// Ensure history file name is unique
-	counter := 0
-	historyFile = filepath.Join(historyDir, timestampStr)
-	for {
-		if _, err := os.Stat(historyFile); os.IsNotExist(err) {
-			break
+	// Write new value
+	err = os.WriteFile(dataFile, value, 0644)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return "", errorWrap(err, "writing file")
 		}
-		counter++
-		historyFile = filepath.Join(historyDir, timestampStr+"_"+strconv.Itoa(counter))
+
+		// Directory doesn't exist, create it and retry
+		if mkdirErr := os.MkdirAll(filepath.Dir(dataFile), 0755); mkdirErr != nil {
+			return "", errorWrap(mkdirErr, "creating directory")
+		}
+
+		// Retry writing the file after creating the directory
+		err = os.WriteFile(dataFile, value, 0644)
+		if err != nil {
+			return "", errorWrap(err, "writing file")
+		}
+
+		// Directory doesn't exist, create it and retry
+		mkdirErr := os.MkdirAll(historyDir, 0755)
+		if mkdirErr != nil {
+			if !f.ignoreWarning {
+				return "", errorWrap(mkdirErr, "creating history directory")
+			}
+		}
 	}
 
-	// Write to history file
-	if err := os.WriteFile(historyFile, value, 0644); err != nil {
-		return "", errorWrap(err, "writing history file")
+	err = os.WriteFile(historyFile, value, 0644)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return "", errorWrap(err, "writing history file")
+		}
+		// Directory doesn't exist, create it and retry
+		mkdirErr := os.MkdirAll(historyDir, 0755)
+		if mkdirErr != nil {
+			if !f.ignoreWarning {
+				return "", errorWrap(mkdirErr, "creating history directory")
+			}
+		} else {
+			// Retry writing the file after creating the directory
+			err = os.WriteFile(historyFile, value, 0644)
+			if err != nil {
+				return "", errorWrap(err, "writing history file")
+			}
+		}
 	}
 
 	return timestampStr, nil
@@ -1297,114 +1304,4 @@ func (f *FileKVStore) Fsck(ctx context.Context) error {
 	}
 
 	return nil
-}
-
-// CachedFileKVStore implements the KeyValueStore interface with caching
-type CachedFileKVStore struct {
-	store *FileKVStore
-	cache map[string][]byte
-}
-
-func NewCachedFileKVStore(store *FileKVStore) *CachedFileKVStore {
-	return &CachedFileKVStore{
-		store: store,
-		cache: make(map[string][]byte),
-	}
-}
-
-func (c *CachedFileKVStore) Get(ctx context.Context, key string) ([]byte, error) {
-	if val, ok := c.cache[key]; ok {
-		return val, nil
-	}
-
-	val, err := c.store.Get(ctx, key)
-	if err != nil {
-		return nil, err
-	}
-
-	// Cache the result
-	c.cache[key] = val
-	return val, nil
-}
-
-func (c *CachedFileKVStore) GetByVersion(ctx context.Context, key string, version string) ([]byte, error) {
-	return c.store.GetByVersion(ctx, key, version)
-}
-
-func (c *CachedFileKVStore) Set(ctx context.Context, key string, value []byte) (string, error) {
-	return c.SetWithTimestamp(ctx, key, value, timex.Now().UnixNano())
-}
-
-func (c *CachedFileKVStore) SetWithTimestamp(ctx context.Context, key string, value []byte, timestamp int64) (string, error) {
-	version, err := c.store.SetWithTimestamp(ctx, key, value, timestamp)
-	if err != nil {
-		return "", err
-	}
-
-	// Update cache if version is not empty (meaning value changed)
-	if version != "" {
-		c.cache[key] = value
-	}
-
-	return version, nil
-}
-
-func (c *CachedFileKVStore) SetMeta(ctx context.Context, key, version string, meta map[string]string) error {
-	return c.store.SetMeta(ctx, key, version, meta)
-}
-
-func (c *CachedFileKVStore) UpdateMeta(ctx context.Context, key, version string, meta map[string]string) error {
-	return c.store.UpdateMeta(ctx, key, version, meta)
-}
-
-func (c *CachedFileKVStore) Delete(ctx context.Context, key string, removeHistories bool) error {
-	err := c.store.Delete(ctx, key, removeHistories)
-	if err != nil {
-		return err
-	}
-
-	// Remove from cache
-	delete(c.cache, key)
-	return nil
-}
-
-func (c *CachedFileKVStore) Exists(ctx context.Context, key string) (bool, error) {
-	// Check cache first
-	if _, ok := c.cache[key]; ok {
-		return true, nil
-	}
-
-	return c.store.Exists(ctx, key)
-}
-
-func (c *CachedFileKVStore) ListKeys(ctx context.Context, prefix string) ([]string, error) {
-	return c.store.ListKeys(ctx, prefix)
-}
-
-func (c *CachedFileKVStore) GetHistories(ctx context.Context, key string) ([]Version, error) {
-	return c.store.GetHistories(ctx, key)
-}
-
-func (c *CachedFileKVStore) GetLastVersion(ctx context.Context, key string) (*Version, error) {
-	return c.store.GetLastVersion(ctx, key)
-}
-
-func (c *CachedFileKVStore) GetPrevVersion(ctx context.Context, key, revision string) (*Version, error) {
-	return c.store.GetPrevVersion(ctx, key, revision)
-}
-
-func (c *CachedFileKVStore) GetNextVersion(ctx context.Context, key, revision string) (*Version, error) {
-	return c.store.GetNextVersion(ctx, key, revision)
-}
-
-func (c *CachedFileKVStore) CleanupHistoriesByTime(ctx context.Context, key string, maxAge time.Duration) error {
-	return c.store.CleanupHistoriesByTime(ctx, key, maxAge)
-}
-
-func (c *CachedFileKVStore) CleanupHistoriesByCount(ctx context.Context, key string, maxCount int) error {
-	return c.store.CleanupHistoriesByCount(ctx, key, maxCount)
-}
-
-func (c *CachedFileKVStore) Fsck(ctx context.Context) error {
-	return c.store.Fsck(ctx)
 }
