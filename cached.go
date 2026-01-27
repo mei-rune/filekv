@@ -38,7 +38,17 @@ func (c *CachedFileKVStore) GetByVersion(ctx context.Context, key string, versio
 }
 
 func (c *CachedFileKVStore) Set(ctx context.Context, key string, value []byte) (string, error) {
-	return c.Set(ctx, key, value)
+	version, err := c.store.Set(ctx, key, value)
+	if err != nil {
+		return "", err
+	}
+
+	// Update cache if version is not empty (meaning value changed)
+	if version != "" {
+		c.cache[key] = value
+	}
+
+	return version, nil
 }
 
 func (c *CachedFileKVStore) SetWithTimestamp(ctx context.Context, key string, value []byte, timestamp int64) (string, error) {

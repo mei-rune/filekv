@@ -60,25 +60,9 @@ func ImportGitRepo(ctx context.Context, store KeyValueStore, gitdir string, filt
 		return nil, err
 	}
 
-	// First pass: Count total commits
-	totalCommits := 0
-	err = commitIter.ForEach(func(c *GitCommit) error {
-		totalCommits++
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-
 	// Notify progress: starting to collect commits
 	if callback != nil {
 		callback(ctx, "collecting", 0, 0, "Starting to collect commits")
-	}
-
-	// Reset commitIter to collect commits
-	commitIter, err = r.Log(logOptions)
-	if err != nil {
-		return nil, err
 	}
 
 	// Collect all commits in forward order (newest to oldest)
@@ -88,7 +72,7 @@ func ImportGitRepo(ctx context.Context, store KeyValueStore, gitdir string, filt
 
 		// Notify progress: finished collecting commits
 		if callback != nil {
-			callback(ctx, "collecting", len(commits), totalCommits, "collecting commits")
+			callback(ctx, "collecting", len(commits), 0, "collecting commit - "+c.Committer.When.Format(time.RFC3339))
 		}
 
 		return nil
@@ -127,13 +111,13 @@ func ImportGitRepo(ctx context.Context, store KeyValueStore, gitdir string, filt
 
 		// Iterate through all commits from oldest to newest
 		if callback != nil {
-			callback(ctx, "processing", idx, len(commits), "process commit")
+			callback(ctx, "processing", idx, len(commits), "process commit - "+c.Committer.When.Format(time.RFC3339))
 		}
 
 		// Get the tree from the commit
 		tree, err := c.Tree()
 		if err != nil {
-			result.Errors = append(result.Errors, err)
+			result.Errors = append(result.Errors, errorWrap(err, "commit "+c.Committer.When.Format(time.RFC3339)))
 			continue
 		}
 
@@ -150,7 +134,7 @@ func ImportGitRepo(ctx context.Context, store KeyValueStore, gitdir string, filt
 			// Read file content
 			content, err := f.Contents()
 			if err != nil {
-				result.Errors = append(result.Errors, err)
+				result.Errors = append(result.Errors, errorWrap(err, filePath))
 				return nil
 			}
 
@@ -161,7 +145,7 @@ func ImportGitRepo(ctx context.Context, store KeyValueStore, gitdir string, filt
 				// Content has changed, create history record
 				kvVersion, err := store.SetWithTimestamp(ctx, filePath, contentBytes, c.Committer.When.UnixNano())
 				if err != nil {
-					result.Errors = append(result.Errors, err)
+					result.Errors = append(result.Errors, errorWrap(err, filePath))
 					return nil
 				}
 
@@ -181,7 +165,7 @@ func ImportGitRepo(ctx context.Context, store KeyValueStore, gitdir string, filt
 			return nil
 		})
 		if err != nil {
-			result.Errors = append(result.Errors, err)
+			result.Errors = append(result.Errors, errorWrap(err, "commit "+c.Committer.When.Format(time.RFC3339)))
 		}
 	}
 
