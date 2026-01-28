@@ -50,10 +50,10 @@ type KeyValueStore interface {
 	// ctx: 上下文，用于取消或超时控制
 	// key: 键名
 	// value: 要设置的值
-	// timestamp: 时间戳，单位为纳秒
+	// timestamp: 时间戳
 	// 返回值：新版本号（如果值与上次相同则返回空串）和错误信息
 	// 当 value 和上次相等时，不保存，不产生历史记录，返回值中 version 返回空串
-	SetWithTimestamp(ctx context.Context, key string, value []byte, timestamp int64) (version string, err error)
+	SetWithTimestamp(ctx context.Context, key string, value []byte, timestamp time.Time) (version string, err error)
 
 	// SetMeta 设置键的元数据
 	// ctx: 上下文，用于取消或超时控制
@@ -358,10 +358,10 @@ func (f *FileKVStore) GetByVersion(ctx context.Context, key string, version stri
 }
 
 func (f *FileKVStore) Set(ctx context.Context, key string, value []byte) (string, error) {
-	return f.SetWithTimestamp(ctx, key, value, timex.Now().UnixNano())
+	return f.SetWithTimestamp(ctx, key, value, timex.Now())
 }
 
-func (f *FileKVStore) SetWithTimestamp(ctx context.Context, key string, value []byte, timestamp int64) (string, error) {
+func (f *FileKVStore) SetWithTimestamp(ctx context.Context, key string, value []byte, timestamp time.Time) (string, error) {
 	if err := f.validateKey(key); err != nil {
 		return "", err
 	}
@@ -384,7 +384,7 @@ func (f *FileKVStore) SetWithTimestamp(ctx context.Context, key string, value []
 	}
 
 	// Create history record
-	timestampStr := strconv.FormatInt(timestamp, 10)
+	timestampStr := strconv.FormatInt(timestamp.UnixNano(), 10)
 	historyDir := f.keyToHistoryPath(key)
 	historyFile := filepath.Join(historyDir, timestampStr)
 

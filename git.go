@@ -143,7 +143,7 @@ func ImportGitRepo(ctx context.Context, store KeyValueStore, gitdir string, filt
 			// Check if content has changed
 			if lastBytes, ok := lastContent[filePath]; !ok || !bytes.Equal(lastBytes, contentBytes) {
 				// Content has changed, create history record
-				kvVersion, err := store.SetWithTimestamp(ctx, filePath, contentBytes, c.Committer.When.UnixNano())
+				kvVersion, err := store.SetWithTimestamp(ctx, filePath, contentBytes, c.Committer.When)
 				if err != nil {
 					result.Errors = append(result.Errors, errorWrap(err, filePath))
 					return nil

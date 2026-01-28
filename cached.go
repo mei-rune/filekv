@@ -1,6 +1,7 @@
 package filekv
 
 import (
+	"bytes"
 	"context"
 	"time"
 )
@@ -38,6 +39,12 @@ func (c *CachedFileKVStore) GetByVersion(ctx context.Context, key string, versio
 }
 
 func (c *CachedFileKVStore) Set(ctx context.Context, key string, value []byte) (string, error) {
+	if val, ok := c.cache[key]; ok {
+		if bytes.Equal(val, value) {
+			return "", nil
+		}
+	}
+
 	version, err := c.store.Set(ctx, key, value)
 	if err != nil {
 		return "", err
@@ -51,7 +58,7 @@ func (c *CachedFileKVStore) Set(ctx context.Context, key string, value []byte) (
 	return version, nil
 }
 
-func (c *CachedFileKVStore) SetWithTimestamp(ctx context.Context, key string, value []byte, timestamp int64) (string, error) {
+func (c *CachedFileKVStore) SetWithTimestamp(ctx context.Context, key string, value []byte, timestamp time.Time) (string, error) {
 	version, err := c.store.SetWithTimestamp(ctx, key, value, timestamp)
 	if err != nil {
 		return "", err
