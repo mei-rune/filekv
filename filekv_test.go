@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -608,4 +609,101 @@ func TestCachedFileKVStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestFileKVStore_WithCompareFunc(t *testing.T) {
+	// 创建临时目录
+	tempDir, err := os.MkdirTemp("", "filekv-comparefunc-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// 创建一个忽略每行前后空白符的比较函数
+	trimCompareFunc := func(a, b []byte) bool {
+		// 将字节数组转换为字符串并按行分割
+		aLines := strings.Split(string(a), "\n")
+		bLines := strings.Split(string(b), "\n")
+
+		// 检查行数是否相同
+		if len(aLines) != len(bLines) {
+			return false
+		}
+
+		// 比较每行，忽略前后空白符
+		for i, aLine := range aLines {
+			bLine := bLines[i]
+			if strings.TrimSpace(aLine) != strings.TrimSpace(bLine) {
+				return false
+			}
+		}
+
+		return true
+	}
+
+	// 创建 FileKVStore 实例，使用自定义比较函数
+	store := NewFileKVStore(tempDir, WithCompareFunc(trimCompareFunc))
+	ctx := context.Background()
+
+	key := "test/comparefunc"
+
+	// 测试 1: 设置初始值
+	t.Run("SetInitialValue", func(t *testing.T) {
+		initialValue := []byte("  hello world  \n  test line  \n")
+		version, err := store.Set(ctx, key, initialValue)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if version == "" {
+			t.Fatal("expected version, got empty string")
+		}
+	})
+
+	// 测试 2: 设置只在空白符上有差异的值，应该返回空版本（不创建新历史）
+	t.Run("SetWithWhitespaceDifference", func(t *testing.T) {
+		whitespaceDiffValue := []byte("hello world\ntest line\n")
+		version, err := store.Set(ctx, key, whitespaceDiffValue)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if version != "" {
+			t.Fatal("expected empty version (no change), got non-empty string")
+		}
+	})
+
+	// 测试 3: 设置只在空白符上有差异的值（不同的空白符模式），应该返回空版本
+	t.Run("SetWithDifferentWhitespacePattern", func(t *testing.T) {
+		differentWhitespaceValue := []byte("   hello world\n\ttest line   \n")
+		version, err := store.Set(ctx, key, differentWhitespaceValue)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if version != "" {
+			t.Fatal("expected empty version (no change), got non-empty string")
+		}
+	})
+
+	// 测试 4: 设置真正不同的值，应该返回新版本
+	t.Run("SetWithActualDifference", func(t *testing.T) {
+		actualDiffValue := []byte("hello world\ndifferent line\n")
+		version, err := store.Set(ctx, key, actualDiffValue)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if version == "" {
+			t.Fatal("expected version (actual change), got empty string")
+		}
+	})
+
+	// 测试 5: 验证最终值是否正确
+	t.Run("VerifyFinalValue", func(t *testing.T) {
+		finalValue, err := store.Get(ctx, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		expectedValue := []byte("hello world\ndifferent line\n")
+		if string(finalValue) != string(expectedValue) {
+			t.Fatalf("expected %q, got %q", expectedValue, finalValue)
+		}
+	})
 }

@@ -165,12 +165,29 @@ func errorWrap(err error, msg string) error {
 type FileKVStore struct {
 	rootDir       string
 	ignoreWarning bool
+	compareFunc   func(a, b []byte) bool
 }
 
-func NewFileKVStore(rootDir string) *FileKVStore {
-	return &FileKVStore{
+func WithIgnoreWarning(value bool) func(*FileKVStore) {
+	return func(s *FileKVStore) {
+		s.ignoreWarning = value
+	}
+}
+
+func WithCompareFunc(fn func(a, b []byte) bool) func(*FileKVStore) {
+	return func(s *FileKVStore) {
+		s.compareFunc = fn
+	}
+}
+
+func NewFileKVStore(rootDir string, opts ...func(*FileKVStore)) *FileKVStore {
+	s := &FileKVStore{
 		rootDir: rootDir,
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 func (f *FileKVStore) validateKey(key string) error {
@@ -358,7 +375,11 @@ func (f *FileKVStore) SetWithTimestamp(ctx context.Context, key string, value []
 	}
 
 	// If value is the same, don't create new history
-	if bytes.Equal(existingValue, value) {
+	if f.compareFunc != nil {
+		if f.compareFunc(existingValue, value) {
+			return "", nil
+		}
+	} else if bytes.Equal(existingValue, value) {
 		return "", nil
 	}
 
