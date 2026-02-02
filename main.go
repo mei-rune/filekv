@@ -324,8 +324,12 @@ func (f *FileKVStore) searchVersionInSubDirs(ctx context.Context, historyDir str
 	return "", errors.Join(errList...)
 }
 
+func isHeadRevision(revision string) bool {
+	return revision == "" || revision == "head" || revision == "HEAD"
+}
+
 func (f *FileKVStore) GetByVersion(ctx context.Context, key string, version string) ([]byte, error) {
-	if version == "head" || version == "HEAD" {
+	if isHeadRevision(version) {
 		return f.Get(ctx, key)
 	}
 
@@ -473,7 +477,7 @@ func (f *FileKVStore) SetMeta(ctx context.Context, key, version string, meta map
 
 	historyDir := f.keyToHistoryPath(key)
 
-	if version == "head" || version == "HEAD" {
+	if isHeadRevision(version) {
 		lastVersion, err := f.GetLastVersion(ctx, key)
 		if err != nil {
 			if !os.IsNotExist(err) {
@@ -523,7 +527,7 @@ func (f *FileKVStore) UpdateMeta(ctx context.Context, key, version string, meta 
 	historyDir := f.keyToHistoryPath(key)
 
 	var metaFile string
-	if version == "head" || version == "HEAD" {
+	if isHeadRevision(version) {
 		lastVersion, err := f.GetLastVersion(ctx, key)
 		if err != nil {
 			// If no history exists, create one based on current value
@@ -883,7 +887,7 @@ func (f *FileKVStore) GetPrevVersion(ctx context.Context, key, revision string) 
 
 	// Find the target version index
 	targetIndex := -1
-	if revision == "head" || revision == "HEAD" {
+	if isHeadRevision(revision) {
 		// For HEAD, we want the previous of the last version
 		if len(histories) < 2 {
 			// No previous version
@@ -914,7 +918,7 @@ func (f *FileKVStore) GetPrevVersion(ctx context.Context, key, revision string) 
 }
 
 func (f *FileKVStore) GetNextVersion(ctx context.Context, key, revision string) (*Version, error) {
-	if revision == "head" || revision == "HEAD" {
+	if isHeadRevision(revision) {
 		return nil, errorWrap(os.ErrNotExist, "no next version found")
 	}
 
