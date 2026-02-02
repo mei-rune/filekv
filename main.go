@@ -325,7 +325,7 @@ func (f *FileKVStore) searchVersionInSubDirs(ctx context.Context, historyDir str
 }
 
 func isHeadRevision(revision string) bool {
-	return revision == "" || revision == "head" || revision == "HEAD"
+	return revision == "" || revision == "head" || revision == "HEAD" || revision == "Head"
 }
 
 func (f *FileKVStore) GetByVersion(ctx context.Context, key string, version string) ([]byte, error) {
